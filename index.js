@@ -61,8 +61,26 @@ async function run() {
       res.send({ token })
     })
 
+
+    //warning: verifyJWT before using verifyAdmin
+    const verifyAdmin=async(req,res,next)=>{
+      const email= req.decoded.email;
+      const query={email:email}
+      const user= await usersCollection.findOne(query);
+      if(user?.role !=='admin'){
+        return res.status(403).send({error: true, message: 'forbidden message'});
+      }
+      next();
+    }
+
+    /* 
+      1. do not show secure links to those who should not see the links
+      2. use jwt token: verifyToken
+      3. use verifyAdmin middleware
+    */
+
     // users related api
-    app.get('/users', async (req, res) => {
+    app.get('/users', verifyJWT, verifyAdmin, async (req, res) => {
       const result = await usersCollection.find().toArray();
       res.send(result);
     })
@@ -78,6 +96,23 @@ async function run() {
         return res.send({ message: ' user already exists' })
       }
       const result = await usersCollection.insertOne(user);
+      res.send(result);
+    })
+
+// security 1st layer: verifyJWT
+// email same
+// check admin
+    app.get('/users/admin/:email', verifyJWT, async(req,res)=>{
+      const email= req.params.email;
+
+      if(req.decoded.email !==email){
+        res.send({admin: false})
+      }
+
+
+      const query={email:email};
+      const user=await usersCollection.findOne(query);
+      const result={admin: user?.role==='admin'};
       res.send(result);
     })
 
@@ -106,6 +141,19 @@ async function run() {
     app.get('/menu', async (req, res) => {
       const result = await menuCollection.find().toArray();
       res.send(result);
+    })
+
+    app.post('/menu', verifyJWT, verifyAdmin, async(req, res)=>{
+      const newItem=req.body;
+      const result= await menuCollection.insertOne(newItem);
+      res.send(result);
+    })
+    app.delete('/menu/:id', verifyJWT, verifyAdmin, async(req,res)=>{
+      const id=req.params.id;
+      const query={_id: new ObjectId(id)};
+      const result= await menuCollection.deleteOne(query);
+      res.send(result);
+
     })
 
     // review related api
