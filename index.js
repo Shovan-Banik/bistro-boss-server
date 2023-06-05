@@ -4,25 +4,27 @@ const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
+const stripe = require('stripe')(process.env.PAYMENT_SECRET_KEY)
+
 const port = process.env.PORT || 5000;
 
 // middleware
 app.use(cors());
 app.use(express.json());
 
-const verifyJWT=(req,res,next)=>{
-  const authorization=req.headers.authorization;
-  if(!authorization){
-    return res.status(401).send({error:true, message: 'unauthorized access'});
+const verifyJWT = (req, res, next) => {
+  const authorization = req.headers.authorization;
+  if (!authorization) {
+    return res.status(401).send({ error: true, message: 'unauthorized access' });
   }
   // bearer token
-  const token=authorization.split(' ')[1];
+  const token = authorization.split(' ')[1];
 
-  jwt.verify(token,process.env.ACCESS_TOKEN_SECRET,(err,decoded)=>{
-    if(err){
-      return res.status(401).send({error:true, message: 'unauthorized access'})
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ error: true, message: 'unauthorized access' })
     }
-    req.decoded=decoded;
+    req.decoded = decoded;
     next();
   })
 }
@@ -51,24 +53,25 @@ async function run() {
     const menuCollection = client.db('bistroDB').collection('menu');
     const reviewCollection = client.db('bistroDB').collection('reviews');
     const cartCollection = client.db('bistroDB').collection('carts');
+    const paymentCollection = client.db('bistroDB').collection('payments');
 
 
     // create token
     app.post('/jwt', (req, res) => {
       const user = req.body;
-      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1hr' })
+      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '3hr' })
       console.log(token);
       res.send({ token })
     })
 
 
     //warning: verifyJWT before using verifyAdmin
-    const verifyAdmin=async(req,res,next)=>{
-      const email= req.decoded.email;
-      const query={email:email}
-      const user= await usersCollection.findOne(query);
-      if(user?.role !=='admin'){
-        return res.status(403).send({error: true, message: 'forbidden message'});
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email: email }
+      const user = await usersCollection.findOne(query);
+      if (user?.role !== 'admin') {
+        return res.status(403).send({ error: true, message: 'forbidden message' });
       }
       next();
     }
@@ -99,20 +102,20 @@ async function run() {
       res.send(result);
     })
 
-// security 1st layer: verifyJWT
-// email same
-// check admin
-    app.get('/users/admin/:email', verifyJWT, async(req,res)=>{
-      const email= req.params.email;
+    // security 1st layer: verifyJWT
+    // email same
+    // check admin
+    app.get('/users/admin/:email', verifyJWT, async (req, res) => {
+      const email = req.params.email;
 
-      if(req.decoded.email !==email){
-        res.send({admin: false})
+      if (req.decoded.email !== email) {
+        res.send({ admin: false })
       }
 
 
-      const query={email:email};
-      const user=await usersCollection.findOne(query);
-      const result={admin: user?.role==='admin'};
+      const query = { email: email };
+      const user = await usersCollection.findOne(query);
+      const result = { admin: user?.role === 'admin' };
       res.send(result);
     })
 
@@ -143,15 +146,15 @@ async function run() {
       res.send(result);
     })
 
-    app.post('/menu', verifyJWT, verifyAdmin, async(req, res)=>{
-      const newItem=req.body;
-      const result= await menuCollection.insertOne(newItem);
+    app.post('/menu', verifyJWT, verifyAdmin, async (req, res) => {
+      const newItem = req.body;
+      const result = await menuCollection.insertOne(newItem);
       res.send(result);
     })
-    app.delete('/menu/:id', verifyJWT, verifyAdmin, async(req,res)=>{
-      const id=req.params.id;
-      const query={_id: new ObjectId(id)};
-      const result= await menuCollection.deleteOne(query);
+    app.delete('/menu/:id', verifyJWT, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.deleteOne(query);
       res.send(result);
 
     })
@@ -169,9 +172,9 @@ async function run() {
         res.send([]);
       }
 
-      const decodedEmail=req.decoded.email;
-      if(email !==decodedEmail){
-        return res.status(403).send({error:true, message: 'forbidden access'});
+      const decodedEmail = req.decoded.email;
+      if (email !== decodedEmail) {
+        return res.status(403).send({ error: true, message: 'forbidden access' });
       }
 
       const query = { email: email }
@@ -192,7 +195,108 @@ async function run() {
       res.send(result);
     })
 
+    // create payment intent
+    app.post('/create-payment-intent', verifyJWT, async (req, res) => {
+      const { price } = req.body;
+      const amount = parseInt(price * 100);
+      console.log(amount);
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      })
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      })
+    })
 
+    // payment related api
+    app.post('/payments', verifyJWT, async (req, res) => {
+      const payment = req.body;
+      const insertResult = await paymentCollection.insertOne(payment);
+      const query = { _id: { $in: payment.cartItems.map(id => new ObjectId(id)) } }
+      const deleteResult = await cartCollection.deleteMany(query);
+
+      res.send({ insertResult, deleteResult });
+    })
+
+    app.get('/admin-stats', verifyJWT, verifyAdmin, async (req, res) => {
+      const users = await usersCollection.estimatedDocumentCount();
+      const products = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+
+      const payments = await paymentCollection.find().toArray();
+      const revenue = payments.reduce((sum, payment) => sum + payment.price, 0).toFixed(2);
+
+      res.send({
+        revenue,
+        users,
+        products,
+        orders
+      })
+    })
+
+    /**
+    * ---------------
+    * BANGLA SYSTEM(second best solution)
+    * ---------------
+    * 1. load all payments
+    * 2. for each payment, get the menuItems array
+    * 3. for each item in the menuItems array get the menuItem from the menu collection
+    * 4. put them in an array: allOrderedItems
+    * 5. separate allOrderedItems by category using filter
+    * 6. now get the quantity by using length: pizzas.length
+    * 7. for each category use reduce to get the total amount spent on this category
+    * 
+   */
+
+    app.get('/order-stats',verifyJWT,verifyAdmin, async (req, res) => {
+      const pipeline = [
+        {
+          $addFields: {
+            menuItemsObjectIds: {
+              $map: {
+                input: '$menuItems',
+                as: 'itemId',
+                in: { $toObjectId: '$$itemId' }
+              }
+            }
+          }
+        },
+        {
+          $lookup: {
+            from: 'menu',
+            localField: 'menuItemsObjectIds',
+            foreignField: '_id',
+            as: 'menuItemsData'
+          }
+        },
+        {
+          $unwind: '$menuItemsData'
+        },
+        {
+          $group: {
+            _id: '$menuItemsData.category',
+            count: { $sum: 1 },
+            total: { $sum: '$menuItemsData.price' }
+          }
+        },
+        {
+          $project: {
+            category: '$_id',
+            count: 1,
+            total: { $round: ['$total', 2] },
+            _id: 0
+          }
+        }
+      ];
+
+      const result = await paymentCollection.aggregate(pipeline).toArray()
+      res.send(result)
+      console.log(result);
+
+    })
 
 
 
